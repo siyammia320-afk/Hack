@@ -1,0 +1,6 @@
+{
+  "name": "Data Transfer",
+  "description": "Shizuku file transfer and floating overlay utility",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
