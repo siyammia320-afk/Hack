@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Data Transfer"
+rootProject.name = "BABA PNAL"
 
 include(":app")

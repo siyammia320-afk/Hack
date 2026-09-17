@@ -149,16 +149,16 @@ object ShizukuManager {
 
   fun copyFilesToTarget(context: Context): Pair<Boolean, String> {
     if (!isShizukuRunning()) {
-      return Pair(false, "Shizuku চালু নেই")
+      return Pair(false, "Shizuku is not running")
     }
     if (!hasPermission()) {
-      return Pair(false, "Shizuku পারমিশন নেই")
+      return Pair(false, "Shizuku permission not granted")
     }
 
     val sourceDir = getSourceDirectory(context)
     val files = sourceDir.listFiles()?.filter { it.isFile && it.name != "README.txt" }
     if (files.isNullOrEmpty()) {
-      return Pair(false, "APK বা স্টোরেজের 'file' ফোল্ডারে কোনো ফাইল পাওয়া যায়নি")
+      return Pair(false, "No files found in APK or storage 'file' folder")
     }
 
     val targetPath = TARGET_PACKAGE_PATH
@@ -172,7 +172,7 @@ object ShizukuManager {
       )
       method.isAccessible = true
 
-      // ১. টার্গেট ফোল্ডার তৈরি ও প্রিভিলেজ সেট করা
+      // 1. Target directory creation
       val mkdirProcess = method.invoke(
         null,
         arrayOf("sh", "-c", "mkdir -p \"$targetPath\" && chmod 777 \"$targetPath\""),
@@ -181,7 +181,7 @@ object ShizukuManager {
       ) as java.lang.Process
       mkdirProcess.waitFor()
 
-      // ২. সরাসরি বাইট স্ট্রিমিং মেথডে ফাইল কপি করা (কোনো পারমিশন ব্লক হবে না)
+      // 2. Direct byte streaming file transfer
       var copiedCount = 0
       for (file in files) {
         val success = transferFileWithShizuku(file, targetPath)
@@ -190,7 +190,7 @@ object ShizukuManager {
         }
       }
 
-      // ৩. ওভারঅল chmod দেওয়া
+      // 3. Chmod target directory
       val chmodProcess = method.invoke(
         null,
         arrayOf("sh", "-c", "chmod -R 777 \"$targetPath\""),
@@ -200,22 +200,62 @@ object ShizukuManager {
       chmodProcess.waitFor()
 
       if (copiedCount > 0) {
-        Pair(true, "$copiedCount টি ফাইল সফলভাবে com.arafat.com ফোল্ডারে ডাউনলোড হয়েছে")
+        Pair(true, "$copiedCount files downloaded to com.arafat.com")
       } else {
-        // ফলব্যাক হিসেবে সাধারণ cp ট্রাই করা
+        // Fallback cp
         val sourcePath = sourceDir.absolutePath
         val fallbackCmd = "cp -rf \"$sourcePath\"/* \"$targetPath/\" && chmod -R 777 \"$targetPath\""
         val fallbackProcess = method.invoke(null, arrayOf("sh", "-c", fallbackCmd), null, null) as java.lang.Process
         val err = fallbackProcess.errorStream.bufferedReader().use { it.readText() }
         val code = fallbackProcess.waitFor()
         if (code == 0) {
-          Pair(true, "${files.size} টি ফাইল সফলভাবে ডাউনলোড হয়েছে")
+          Pair(true, "${files.size} files downloaded successfully")
         } else {
-          Pair(false, "ব্যর্থ হয়েছে: $err")
+          Pair(false, "Failed: $err")
         }
       }
     } catch (e: Throwable) {
-      Pair(false, "ত্রুটি: ${e.message}")
+      Pair(false, "Error: ${e.message}")
+    }
+  }
+
+  fun deleteFilesFromTarget(context: Context): Pair<Boolean, String> {
+    if (!isShizukuRunning()) {
+      return Pair(false, "Shizuku is not running")
+    }
+    if (!hasPermission()) {
+      return Pair(false, "Shizuku permission not granted")
+    }
+
+    val sourceDir = getSourceDirectory(context)
+    val files = sourceDir.listFiles()?.filter { it.isFile && it.name != "README.txt" } ?: emptyList()
+    val targetPath = TARGET_PACKAGE_PATH
+
+    return try {
+      val method = Shizuku::class.java.getDeclaredMethod(
+        "newProcess",
+        Array<String>::class.java,
+        Array<String>::class.java,
+        String::class.java
+      )
+      method.isAccessible = true
+
+      if (files.isNotEmpty()) {
+        for (file in files) {
+          val filePath = "$targetPath/${file.name}"
+          val delCmd = "rm -f \"$filePath\""
+          val p = method.invoke(null, arrayOf("sh", "-c", delCmd), null, null) as java.lang.Process
+          p.waitFor()
+        }
+      } else {
+        val delCmd = "rm -rf \"$targetPath\"/*"
+        val p = method.invoke(null, arrayOf("sh", "-c", delCmd), null, null) as java.lang.Process
+        p.waitFor()
+      }
+
+      Pair(true, "Files deleted successfully")
+    } catch (e: Throwable) {
+      Pair(false, "Error: ${e.message}")
     }
   }
 }

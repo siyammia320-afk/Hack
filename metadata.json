@@ -1,6 +1,6 @@
 {
-  "name": "Data Transfer",
-  "description": "Shizuku file transfer and floating overlay utility",
+  "name": ".BABA PNAL",
+  "description": ".BABA PNAL Shizuku file utility",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
