@@ -1,6 +1,6 @@
 {
-  "name": ".BABA PNAL",
-  "description": ".BABA PNAL Shizuku file utility",
+  "name": "MT File Manager",
+  "description": "MT Manager style File Manager with full file operations and Shizuku Android/data access",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
