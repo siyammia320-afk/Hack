@@ -48,13 +48,175 @@ data class ClipboardItem(
   val item: FileItem
 )
 
+data class ZipEntryItem(
+  val name: String,
+  val entryPath: String,
+  val isDirectory: Boolean,
+  val size: Long,
+  val compressedSize: Long = 0L
+) {
+  val formattedSize: String
+    get() {
+      if (isDirectory) return "Folder"
+      if (size < 1024) return "$size B"
+      val kb = size / 1024.0
+      if (kb < 1024) return String.format(Locale.US, "%.1f KB", kb)
+      val mb = kb / 1024.0
+      if (mb < 1024) return String.format(Locale.US, "%.1f MB", mb)
+      val gb = mb / 1024.0
+      return String.format(Locale.US, "%.2f GB", gb)
+    }
+
+  val extension: String
+    get() = if (isDirectory) "" else name.substringAfterLast('.', "").lowercase()
+}
+
 object FileManagerEngine {
   val ROOT_STORAGE_PATH: String = Environment.getExternalStorageDirectory().absolutePath
   const val ANDROID_DATA_PATH = "/storage/emulated/0/Android/data"
   const val ANDROID_OBB_PATH = "/storage/emulated/0/Android/obb"
 
+  fun isArchiveFile(extension: String): Boolean {
+    return extension in setOf("zip", "apk", "jar", "aar")
+  }
+
   fun isRestrictedPath(path: String): Boolean {
     return path.startsWith(ANDROID_DATA_PATH) || path.startsWith(ANDROID_OBB_PATH) || path.startsWith("/data")
+  }
+
+  fun getReadableZipFile(zipFilePath: String, cacheDir: File): File? {
+    val direct = File(zipFilePath)
+    if (direct.exists() && direct.canRead()) {
+      return direct
+    }
+    // If restricted, copy using Shizuku to cache directory
+    if (ShizukuManager.hasPermission()) {
+      val tempFile = File(cacheDir, "temp_archive.zip")
+      val (code, _) = execShizuku("cp -f \"$zipFilePath\" \"${tempFile.absolutePath}\" && chmod 666 \"${tempFile.absolutePath}\"")
+      if (code == 0 && tempFile.exists() && tempFile.canRead()) {
+        return tempFile
+      }
+    }
+    return null
+  }
+
+  fun listZipEntries(zipFilePath: String, subDir: String = "", cacheDir: File): List<ZipEntryItem> {
+    val zipFile = getReadableZipFile(zipFilePath, cacheDir) ?: return emptyList()
+    return try {
+      java.util.zip.ZipFile(zipFile).use { zf ->
+        val normalizedSub = if (subDir.isEmpty() || subDir.endsWith("/")) subDir else "$subDir/"
+        val itemsMap = LinkedHashMap<String, ZipEntryItem>()
+
+        val entries = zf.entries()
+        while (entries.hasMoreElements()) {
+          val entry = entries.nextElement()
+          val entryName = entry.name
+          if (normalizedSub.isNotEmpty() && !entryName.startsWith(normalizedSub)) {
+            continue
+          }
+          val rel = if (normalizedSub.isEmpty()) entryName else entryName.removePrefix(normalizedSub)
+          if (rel.isEmpty() || rel == "/") continue
+
+          val slashIndex = rel.indexOf('/')
+          if (slashIndex != -1) {
+            val dirName = rel.substring(0, slashIndex)
+            val fullDirPath = "$normalizedSub$dirName/"
+            if (!itemsMap.containsKey(fullDirPath)) {
+              itemsMap[fullDirPath] = ZipEntryItem(
+                name = dirName,
+                entryPath = fullDirPath,
+                isDirectory = true,
+                size = 0L,
+                compressedSize = 0L
+              )
+            }
+          } else {
+            if (!itemsMap.containsKey(entryName)) {
+              itemsMap[entryName] = ZipEntryItem(
+                name = rel,
+                entryPath = entryName,
+                isDirectory = entry.isDirectory,
+                size = entry.size.coerceAtLeast(0L),
+                compressedSize = entry.compressedSize.coerceAtLeast(0L)
+              )
+            }
+          }
+        }
+
+        itemsMap.values.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+      }
+    } catch (_: Throwable) {
+      emptyList()
+    }
+  }
+
+  fun readZipEntryText(zipFilePath: String, entryPath: String, cacheDir: File): String {
+    val zipFile = getReadableZipFile(zipFilePath, cacheDir) ?: return "Unable to read archive file"
+    return try {
+      java.util.zip.ZipFile(zipFile).use { zf ->
+        val entry = zf.getEntry(entryPath) ?: return "File entry not found in archive"
+        if (entry.isDirectory) return "Cannot open directory as text"
+        zf.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+      }
+    } catch (e: Throwable) {
+      "Error reading file from archive: ${e.message}"
+    }
+  }
+
+  fun extractZip(zipFilePath: String, destinationDir: String, cacheDir: File): Pair<Boolean, String> {
+    val zipFile = getReadableZipFile(zipFilePath, cacheDir) ?: return Pair(false, "Cannot open archive")
+    return try {
+      val dest = File(destinationDir)
+      if (!dest.exists()) dest.mkdirs()
+
+      java.util.zip.ZipFile(zipFile).use { zf ->
+        val entries = zf.entries()
+        while (entries.hasMoreElements()) {
+          val entry = entries.nextElement()
+          val outFile = File(dest, entry.name)
+          if (entry.isDirectory) {
+            outFile.mkdirs()
+          } else {
+            outFile.parentFile?.mkdirs()
+            zf.getInputStream(entry).use { input ->
+              outFile.outputStream().use { output ->
+                input.copyTo(output)
+              }
+            }
+          }
+        }
+      }
+      Pair(true, "Extracted to $destinationDir")
+    } catch (e: Throwable) {
+      Pair(false, "Extract failed: ${e.message}")
+    }
+  }
+
+  fun extractZipEntry(zipFilePath: String, entryPath: String, destinationDir: String, cacheDir: File): Pair<Boolean, String> {
+    val zipFile = getReadableZipFile(zipFilePath, cacheDir) ?: return Pair(false, "Cannot open archive")
+    return try {
+      val dest = File(destinationDir)
+      if (!dest.exists()) dest.mkdirs()
+
+      java.util.zip.ZipFile(zipFile).use { zf ->
+        val entry = zf.getEntry(entryPath) ?: return Pair(false, "Entry not found in archive")
+        val cleanName = entry.name.substringAfterLast('/').ifEmpty { entry.name }
+        val outFile = File(dest, cleanName)
+        if (entry.isDirectory) {
+          outFile.mkdirs()
+        } else {
+          outFile.parentFile?.mkdirs()
+          zf.getInputStream(entry).use { input ->
+            outFile.outputStream().use { output ->
+              input.copyTo(output)
+            }
+          }
+        }
+      }
+      Pair(true, "Extracted to $destinationDir")
+    } catch (e: Throwable) {
+      Pair(false, "Extract failed: ${e.message}")
+    }
   }
 
   fun execShizuku(cmd: String): Pair<Int, String> {
@@ -346,5 +508,54 @@ object FileManagerEngine {
       }
     }
     return Pair(false, "Permission denied")
+  }
+
+  fun getDiskUsageInfo(): String {
+    return try {
+      val stat = android.os.StatFs(ROOT_STORAGE_PATH)
+      val total = stat.totalBytes
+      val available = stat.availableBytes
+      val used = (total - available).coerceAtLeast(0L)
+      val usedGb = used / (1024.0 * 1024.0 * 1024.0)
+      val totalGb = total / (1024.0 * 1024.0 * 1024.0)
+      String.format(Locale.US, "Disk: %.2fG/%.2fG", usedGb, totalGb)
+    } catch (_: Throwable) {
+      "Disk: --"
+    }
+  }
+
+  fun compressItem(sourceItem: FileItem, targetZipPath: String): Pair<Boolean, String> {
+    return try {
+      val srcFile = File(sourceItem.path)
+      val outFile = File(targetZipPath)
+      java.util.zip.ZipOutputStream(outFile.outputStream().buffered()).use { zos ->
+        if (srcFile.isDirectory) {
+          zipDir(srcFile, srcFile.name, zos)
+        } else {
+          val entry = java.util.zip.ZipEntry(srcFile.name)
+          zos.putNextEntry(entry)
+          srcFile.inputStream().use { it.copyTo(zos) }
+          zos.closeEntry()
+        }
+      }
+      Pair(true, "Compressed to ${outFile.name}")
+    } catch (e: Throwable) {
+      Pair(false, "Compression failed: ${e.message}")
+    }
+  }
+
+  private fun zipDir(dir: File, baseName: String, zos: java.util.zip.ZipOutputStream) {
+    val files = dir.listFiles() ?: return
+    for (file in files) {
+      val entryName = "$baseName/${file.name}"
+      if (file.isDirectory) {
+        zipDir(file, entryName, zos)
+      } else {
+        val entry = java.util.zip.ZipEntry(entryName)
+        zos.putNextEntry(entry)
+        file.inputStream().use { it.copyTo(zos) }
+        zos.closeEntry()
+      }
+    }
   }
 }
