@@ -203,14 +203,20 @@ object ShizukuManager {
       // 1. টার্গেট ডিরেক্টরি প্রস্তুত করা
       executeShizukuCmd("mkdir -p \"$targetPath\" && chmod 777 \"$targetPath\"")
 
-      // 2. প্রতিটি ফাইল এবং ফোল্ডার রিকার্সিভলি কপি ও রিপ্লেস করা
+      // 2. যে যে নামের ফাইল বা ফোল্ডার রয়েছে, টার্গেটে আগে থেকে থাকলে তা প্রথমে ডিলিট করা
+      for (item in items) {
+        val targetItemPath = "$targetPath/${item.name}"
+        executeShizukuCmd("rm -rf \"$targetItemPath\"")
+      }
+
+      // 3. প্রতিটি ফাইল এবং ফোল্ডার রিকার্সিভলি কপি ও রিপ্লেস করা
       var totalFilesCopied = 0
       for (item in items) {
         val (count, _) = transferItemRecursively(item, targetPath)
         totalFilesCopied += count
       }
 
-      // 3. নিশ্চিতকরণের জন্য ফলব্যাক শেল cp -rf রান করা (সব ফাইল ও ফোল্ডার রিপ্লেস হবে)
+      // 4. ফলব্যাক cp -rf যাতে ডিলিট না হলেও সম্পূর্ণ রিপ্লেস ও ওভাররাইট নিশ্চিত হয়
       val sourcePath = sourceDir.absolutePath
       val fallbackCmd = "cp -rf \"$sourcePath\"/* \"$targetPath/\" && chmod -R 777 \"$targetPath\""
       executeShizukuCmd(fallbackCmd)
