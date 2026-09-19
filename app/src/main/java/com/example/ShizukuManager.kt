@@ -48,8 +48,6 @@ object ShizukuManager {
    * APK-র ভেতর assets/file থেকে ফাইলগুলো বের করে Shizuku-অ্যাক্সেসযোগ্য ডিরেক্টরিতে প্রস্তুত রাখা
    */
   fun extractAssetsFileFolder(context: Context): File {
-    // context.filesDir (/data/user/0/...) Shizuku ADB শেল এক্সেস করতে পারে না (Permission denied)।
-    // তাই externalCacheDir অথবা /sdcard/Android/data/... ব্যবহার করব যা ADB শেল সহজে পড়তে পারে।
     val targetLocalDir = context.externalCacheDir?.let { File(it, "temp_file_transfer") }
       ?: File(context.cacheDir, "temp_file_transfer")
 
@@ -58,19 +56,7 @@ object ShizukuManager {
     }
 
     try {
-      val assetManager = context.assets
-      val assetFiles = assetManager.list("file") ?: emptyArray()
-      for (fileName in assetFiles) {
-        if (fileName == "README.txt") continue
-        val outFile = File(targetLocalDir, fileName)
-        assetManager.open("file/$fileName").use { input ->
-          FileOutputStream(outFile).use { output ->
-            input.copyTo(output)
-          }
-        }
-        outFile.setReadable(true, false)
-        outFile.setWritable(true, false)
-      }
+      copyAssetFolderRecursively(context, "file", targetLocalDir)
       targetLocalDir.setReadable(true, false)
       targetLocalDir.setExecutable(true, false)
     } catch (_: Throwable) {}
@@ -78,15 +64,33 @@ object ShizukuManager {
     return targetLocalDir
   }
 
-  fun getSourceDirectory(context: Context): File {
-    // 1. APK-র ভেতরের file ফোল্ডার (Assets)
-    val internalDir = extractAssetsFileFolder(context)
-    val internalFiles = internalDir.listFiles()?.filter { it.isFile && it.name != "README.txt" }
-    if (!internalFiles.isNullOrEmpty()) {
-      return internalDir
+  private fun copyAssetFolderRecursively(context: Context, assetPath: String, targetDir: File) {
+    val assetManager = context.assets
+    val list = assetManager.list(assetPath) ?: return
+    for (child in list) {
+      if (child == "README.txt") continue
+      val childAssetPath = "$assetPath/$child"
+      val childTargetFile = File(targetDir, child)
+      val subList = assetManager.list(childAssetPath)
+      if (subList.isNullOrEmpty()) {
+        assetManager.open(childAssetPath).use { input ->
+          FileOutputStream(childTargetFile).use { output ->
+            input.copyTo(output)
+          }
+        }
+        childTargetFile.setReadable(true, false)
+        childTargetFile.setWritable(true, false)
+      } else {
+        childTargetFile.mkdirs()
+        childTargetFile.setReadable(true, false)
+        childTargetFile.setExecutable(true, false)
+        copyAssetFolderRecursively(context, childAssetPath, childTargetFile)
+      }
     }
+  }
 
-    // 2. MT Manager বা Storage-এ থাকা বাহ্যিক file ফোল্ডার
+  fun getSourceDirectory(context: Context): File {
+    // 1. Storage-এ থাকা বাহ্যিক file ফোল্ডার (MT Manager বা ইউজার তৈরি ফোল্ডার)
     val candidates = listOf(
       File("/storage/emulated/0/Download/file"),
       File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "file"),
@@ -99,28 +103,23 @@ object ShizukuManager {
 
     for (dir in candidates) {
       if (dir.exists() && dir.isDirectory) {
-        val files = dir.listFiles()?.filter { it.isFile && it.name != "README.txt" }
-        if (!files.isNullOrEmpty()) {
+        val items = dir.listFiles()?.filter { it.name != "README.txt" }
+        if (!items.isNullOrEmpty()) {
           return dir
         }
       }
     }
 
-    return internalDir
+    // 2. APK-র ভেতরের file ফোল্ডার (Assets)
+    return extractAssetsFileFolder(context)
   }
 
   fun getSourceFiles(context: Context): List<File> {
     val dir = getSourceDirectory(context)
-    return dir.listFiles()?.filter { it.isFile && it.name != "README.txt" } ?: emptyList()
+    return dir.listFiles()?.filter { it.name != "README.txt" } ?: emptyList()
   }
 
-  /**
-   * একটি নির্দিষ্ট ফাইল Shizuku শেল ব্যবহার করে টার্গেট ফোল্ডারে নিখুঁতভাবে কপি করা
-   */
-  private fun transferFileWithShizuku(sourceFile: File, targetDir: String): Boolean {
-    val targetFilePath = "$targetDir/${sourceFile.name}"
-    val cmd = "cat > \"$targetFilePath\" && chmod 777 \"$targetFilePath\""
-
+  private fun executeShizukuCmd(cmd: String): Boolean {
     return try {
       val method = Shizuku::class.java.getDeclaredMethod(
         "newProcess",
@@ -130,20 +129,57 @@ object ShizukuManager {
       )
       method.isAccessible = true
       val process = method.invoke(null, arrayOf("sh", "-c", cmd), null, null) as java.lang.Process
-
-      // Java Stream দিয়ে সরাসরি Shizuku প্রসেসের ইনপুট স্ট্রিমে বাইট রাইট করা
-      // এতে অ্যান্ড্রয়েড পারমিশনের কোনো 'cp: bad /data/user/0... Permission denied' সমস্যা হবে না
-      sourceFile.inputStream().use { input ->
-        process.outputStream.use { output ->
-          input.copyTo(output)
-          output.flush()
-        }
-      }
-
-      val exitCode = process.waitFor()
-      exitCode == 0
+      process.waitFor() == 0
     } catch (_: Throwable) {
       false
+    }
+  }
+
+  /**
+   * ফাইল বা ফোল্ডার রিকার্সিভলি Shizuku দিয়ে টার্গেটে কপি করা (আগে থেকে থাকলে রিপ্লেস হবে)
+   */
+  private fun transferItemRecursively(item: File, targetBasePath: String, relativePath: String = ""): Pair<Int, Boolean> {
+    val currentRelPath = if (relativePath.isEmpty()) item.name else "$relativePath/${item.name}"
+    val targetItemPath = "$targetBasePath/$currentRelPath"
+
+    return if (item.isDirectory) {
+      // টার্গেটে ফোল্ডার তৈরি
+      executeShizukuCmd("mkdir -p \"$targetItemPath\" && chmod 777 \"$targetItemPath\"")
+      val children: List<File> = item.listFiles()?.filter { it.name != "README.txt" } ?: emptyList()
+      var totalCopied = 0
+      var anySuccess = false
+      for (child in children) {
+        val (count, ok) = transferItemRecursively(child, targetBasePath, currentRelPath)
+        totalCopied += count
+        if (ok) anySuccess = true
+      }
+      Pair(totalCopied, anySuccess || children.isEmpty())
+    } else {
+      // ফাইল কপি: প্যারেন্ট ফোল্ডার নিশ্চিত করা, আগের ফাইল থাকলে রিমুভ করে নতুন রাইট (রিপ্লেস)
+      val parentPath = File(targetItemPath).parent ?: targetBasePath
+      val cmd = "mkdir -p \"$parentPath\" && rm -f \"$targetItemPath\" && cat > \"$targetItemPath\" && chmod 777 \"$targetItemPath\""
+
+      val success = try {
+        val method = Shizuku::class.java.getDeclaredMethod(
+          "newProcess",
+          Array<String>::class.java,
+          Array<String>::class.java,
+          String::class.java
+        )
+        method.isAccessible = true
+        val process = method.invoke(null, arrayOf("sh", "-c", cmd), null, null) as java.lang.Process
+
+        item.inputStream().use { input ->
+          process.outputStream.use { output ->
+            input.copyTo(output)
+            output.flush()
+          }
+        }
+        process.waitFor() == 0
+      } catch (_: Throwable) {
+        false
+      }
+      Pair(if (success) 1 else 0, success)
     }
   }
 
@@ -156,64 +192,32 @@ object ShizukuManager {
     }
 
     val sourceDir = getSourceDirectory(context)
-    val files = sourceDir.listFiles()?.filter { it.isFile && it.name != "README.txt" }
-    if (files.isNullOrEmpty()) {
-      return Pair(false, "No files found in APK or storage 'file' folder")
+    val items = sourceDir.listFiles()?.filter { it.name != "README.txt" }
+    if (items.isNullOrEmpty()) {
+      return Pair(false, "No files or folders found in 'file' folder")
     }
 
     val targetPath = TARGET_PACKAGE_PATH
 
     return try {
-      val method = Shizuku::class.java.getDeclaredMethod(
-        "newProcess",
-        Array<String>::class.java,
-        Array<String>::class.java,
-        String::class.java
-      )
-      method.isAccessible = true
+      // 1. টার্গেট ডিরেক্টরি প্রস্তুত করা
+      executeShizukuCmd("mkdir -p \"$targetPath\" && chmod 777 \"$targetPath\"")
 
-      // 1. Target directory creation
-      val mkdirProcess = method.invoke(
-        null,
-        arrayOf("sh", "-c", "mkdir -p \"$targetPath\" && chmod 777 \"$targetPath\""),
-        null,
-        null
-      ) as java.lang.Process
-      mkdirProcess.waitFor()
-
-      // 2. Direct byte streaming file transfer
-      var copiedCount = 0
-      for (file in files) {
-        val success = transferFileWithShizuku(file, targetPath)
-        if (success) {
-          copiedCount++
-        }
+      // 2. প্রতিটি ফাইল এবং ফোল্ডার রিকার্সিভলি কপি ও রিপ্লেস করা
+      var totalFilesCopied = 0
+      for (item in items) {
+        val (count, _) = transferItemRecursively(item, targetPath)
+        totalFilesCopied += count
       }
 
-      // 3. Chmod target directory
-      val chmodProcess = method.invoke(
-        null,
-        arrayOf("sh", "-c", "chmod -R 777 \"$targetPath\""),
-        null,
-        null
-      ) as java.lang.Process
-      chmodProcess.waitFor()
+      // 3. নিশ্চিতকরণের জন্য ফলব্যাক শেল cp -rf রান করা (সব ফাইল ও ফোল্ডার রিপ্লেস হবে)
+      val sourcePath = sourceDir.absolutePath
+      val fallbackCmd = "cp -rf \"$sourcePath\"/* \"$targetPath/\" && chmod -R 777 \"$targetPath\""
+      executeShizukuCmd(fallbackCmd)
 
-      if (copiedCount > 0) {
-        Pair(true, "$copiedCount files downloaded to com.arafat.com")
-      } else {
-        // Fallback cp
-        val sourcePath = sourceDir.absolutePath
-        val fallbackCmd = "cp -rf \"$sourcePath\"/* \"$targetPath/\" && chmod -R 777 \"$targetPath\""
-        val fallbackProcess = method.invoke(null, arrayOf("sh", "-c", fallbackCmd), null, null) as java.lang.Process
-        val err = fallbackProcess.errorStream.bufferedReader().use { it.readText() }
-        val code = fallbackProcess.waitFor()
-        if (code == 0) {
-          Pair(true, "${files.size} files downloaded successfully")
-        } else {
-          Pair(false, "Failed: $err")
-        }
-      }
+      executeShizukuCmd("chmod -R 777 \"$targetPath\"")
+
+      Pair(true, "Files & folders transferred to com.arafat.com")
     } catch (e: Throwable) {
       Pair(false, "Error: ${e.message}")
     }
@@ -228,32 +232,20 @@ object ShizukuManager {
     }
 
     val sourceDir = getSourceDirectory(context)
-    val files = sourceDir.listFiles()?.filter { it.isFile && it.name != "README.txt" } ?: emptyList()
+    val items = sourceDir.listFiles()?.filter { it.name != "README.txt" } ?: emptyList()
     val targetPath = TARGET_PACKAGE_PATH
 
     return try {
-      val method = Shizuku::class.java.getDeclaredMethod(
-        "newProcess",
-        Array<String>::class.java,
-        Array<String>::class.java,
-        String::class.java
-      )
-      method.isAccessible = true
-
-      if (files.isNotEmpty()) {
-        for (file in files) {
-          val filePath = "$targetPath/${file.name}"
-          val delCmd = "rm -f \"$filePath\""
-          val p = method.invoke(null, arrayOf("sh", "-c", delCmd), null, null) as java.lang.Process
-          p.waitFor()
+      if (items.isNotEmpty()) {
+        for (item in items) {
+          val itemPath = "$targetPath/${item.name}"
+          executeShizukuCmd("rm -rf \"$itemPath\"")
         }
       } else {
-        val delCmd = "rm -rf \"$targetPath\"/*"
-        val p = method.invoke(null, arrayOf("sh", "-c", delCmd), null, null) as java.lang.Process
-        p.waitFor()
+        executeShizukuCmd("rm -rf \"$targetPath\"/*")
       }
 
-      Pair(true, "Files deleted successfully")
+      Pair(true, "Files & folders deleted successfully")
     } catch (e: Throwable) {
       Pair(false, "Error: ${e.message}")
     }

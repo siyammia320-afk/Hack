@@ -704,7 +704,7 @@ fun MainScreen(
                 verticalAlignment = Alignment.CenterVertically
               ) {
                 Text(
-                  text = "Files: $fileCount",
+                  text = "Files / Folders: $fileCount",
                   fontSize = 13.sp,
                   fontFamily = FontFamily.Monospace,
                   fontWeight = FontWeight.Bold,
