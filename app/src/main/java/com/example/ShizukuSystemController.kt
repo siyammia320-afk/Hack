@@ -20,6 +20,8 @@ data class SystemStatus(
   val currentTimezone: String,
   val currentLocale: String,
   val currentCountry: String,
+  val currentLanguage: String,
+  val telephonySimCountry: String,
   val isAutoTimezone: Boolean,
   val formattedCurrentTime: String
 )
@@ -108,77 +110,75 @@ object ShizukuSystemController {
     return logs
   }
 
-  suspend fun applyCountryPreset(
+  suspend fun applyGuineaPreset(
     context: Context,
-    preset: CountryPreset,
-    applyLocation: Boolean = true,
-    applyTimezone: Boolean = true,
-    applyRegion: Boolean = true
+    preset: CountryPreset = PresetRepository.guineaPreset
   ): Result<List<String>> = withContext(Dispatchers.IO) {
     if (!isShizukuRunning()) {
-      return@withContext Result.failure(Exception("Shizuku চালু নেই। আগে Shizuku ওপেন করে চালু করুন।"))
+      return@withContext Result.failure(Exception("Shizuku চালু নেই। Shizuku অ্যাপ ওপেন করে স্টার্ট করুন।"))
     }
     if (!hasPermission()) {
-      return@withContext Result.failure(Exception("Shizuku পারমিশন গ্রান্ট করা হয়নি।"))
+      return@withContext Result.failure(Exception("Shizuku পারমিশন দেওয়া হয়নি। Authorize বাটনে চাপুন।"))
     }
 
     val logs = mutableListOf<String>()
     val pkg = context.packageName
 
-    // ১. প্রথমে দরকারি সব অ্যাপ পারমিশন ADB দিয়ে গ্রান্ট করা
+    // ১. প্রয়োজনীয় সব পারমিশন ADB দিয়ে নিশ্চিত করা
     grantRequiredPermissions(pkg)
 
-    // ২. টাইম জোন সেট করা (Timezone Spoofing)
-    if (applyTimezone) {
-      logs.add("🕒 টাইম জোন আপডেট করা হচ্ছে: ${preset.timezone}...")
-      // অটো টাইম জোন বন্ধ করা
-      runCommand("settings put global auto_time_zone 0")
+    // ২. টাইম জোন সেট করা (Africa/Conakry - +224)
+    logs.add("🕒 টাইম জোন গিনিতে সেট করা হচ্ছে: ${preset.timezone}...")
+    runCommand("settings put global auto_time_zone 0")
+    runCommand("service call alarm 3 s16 \"${preset.timezone}\"")
+    runCommand("setprop persist.sys.timezone \"${preset.timezone}\"")
+    runCommand("cmd time set-time-zone \"${preset.timezone}\"")
+    logs.add("✓ টাইম জোন সেট হয়েছে: ${preset.timezone}")
 
-      // সরাসরি alarm সার্ভিস কল বা setprop দিয়ে সেট করা
-      val (timeOk, timeLog) = runCommand("service call alarm 3 s16 \"${preset.timezone}\"")
-      val (propOk, _) = runCommand("setprop persist.sys.timezone \"${preset.timezone}\"")
+    // ৩. রিজিওন ও কান্ট্রি কোড পরিবর্তন (GN, +224)
+    logs.add("🌐 রিজিওন ও কান্ট্রি কোড পরিবর্তন: ${preset.isoCountryCode} (+224)...")
+    runCommand("setprop persist.sys.country ${preset.isoCountryCode}")
+    runCommand("setprop ro.csc.countryiso_code ${preset.isoCountryCode}")
+    runCommand("setprop persist.sys.cact_country ${preset.isoCountryCode}")
+    runCommand("setprop persist.sys.locale ${preset.locale}")
+    runCommand("settings put system system_locales ${preset.locale}")
+    runCommand("settings put global device_provisioned 1")
+    logs.add("✓ কান্ট্রি ও রিজিওন কোড: ${preset.isoCountryCode} (GN)")
 
-      // cmd time বা toybox date দিয়ে কনফার্মেশন
-      runCommand("cmd time set-time-zone \"${preset.timezone}\"")
+    // ৪. টেলিকম, সিম ও ওয়াইফাই কান্ট্রি স্পুফিং (Telephony & WiFi Country Code GN)
+    logs.add("📶 টেলিকম ও সিম কান্ট্রি +224 (GN) তে স্পুফ করা হচ্ছে...")
+    runCommand("setprop gsm.sim.operator.iso-country ${preset.isoCountryCode.lowercase()}")
+    runCommand("setprop gsm.operator.iso-country ${preset.isoCountryCode.lowercase()}")
+    runCommand("setprop gsm.sim.operator.numeric 61101") // 611 = Guinea Mobile Country Code (MCC)
+    runCommand("setprop gsm.operator.numeric 61101")
+    runCommand("cmd wifi set-country-code ${preset.isoCountryCode}")
+    logs.add("✓ সিম MCC 611 ও নেটওয়ার্ক কান্ট্রি: GN (+224)")
 
-      if (timeOk || propOk) {
-        logs.add("✓ টাইম জোন সফলভাবে সেট হয়েছে: ${preset.timezone}")
+    // ৫. সিস্টেমের ভাষা পরিবর্তন (+224 গিনির অফিশিয়াল ভাষা French fr-GN)
+    logs.add("🗣️ ফোনের সিস্টেম ভাষা পরিবর্তন: ${preset.languageName} (${preset.locale})...")
+    runCommand("setprop persist.sys.language ${preset.language}")
+    runCommand("setprop persist.sys.locale ${preset.locale}")
+    runCommand("setprop persist.sys.locales ${preset.locale}")
+    runCommand("settings put system system_locales ${preset.locale}")
+    runCommand("settings put system user_locale ${preset.locale}")
+    runCommand("cmd activity update-configuration --locale ${preset.locale}")
+    logs.add("✓ সিস্টেম ভাষা ও লোকেল সেট হয়েছে: ${preset.languageName}")
+
+    // ৬. জিপিএস লোকেশন স্পুফিং (Conakry, Guinea)
+    logs.add("📍 জিপিএস লোকেশন সেট করা হচ্ছে: ${preset.latitude}, ${preset.longitude} (Conakry)...")
+    try {
+      setMockGpsLocation(context, preset.latitude, preset.longitude)
+      logs.add("✓ টেস্ট জিপিএস প্রোভাইডার এক্টিভ: ${preset.latitude}, ${preset.longitude}")
+    } catch (e: Throwable) {
+      val (cmdOk, cmdLog) = runCommand("cmd location set-location gps ${preset.latitude} ${preset.longitude}")
+      if (cmdOk) {
+        logs.add("✓ cmd location দিয়ে জিপিএস সেট হয়েছে")
       } else {
-        logs.add("! টাইম জোন নোটিফিকেশন: $timeLog")
+        logs.add("! জিপিএস নোট: ${e.message ?: cmdLog}")
       }
     }
 
-    // ৩. রিজিওন ও ভাষা সেট করা (Region & Country Spoofing)
-    if (applyRegion) {
-      logs.add("🌐 রিজিওন আপডেট করা হচ্ছে: ${preset.isoCountryCode} (${preset.dialCode})...")
-      runCommand("setprop persist.sys.country ${preset.isoCountryCode}")
-      runCommand("setprop persist.sys.locale ${preset.locale}")
-      runCommand("setprop persist.sys.language ${preset.locale.substringBefore('-')}")
-
-      // Settings Global Country/Locale update
-      runCommand("settings put system system_locales ${preset.locale}")
-      runCommand("settings put global device_provisioned 1")
-
-      logs.add("✓ রিজিওন ও কান্ট্রি কোড সফলভাবে সেট হয়েছে: ${preset.isoCountryCode} (${preset.dialCode})")
-    }
-
-    // ৪. জিপিএস লোকেশন স্পুফিং (GPS Location Spoofing)
-    if (applyLocation) {
-      logs.add("📍 জিপিএস লোকেশন পাঠানো হচ্ছে: ${preset.latitude}, ${preset.longitude} (${preset.capitalCity})...")
-      try {
-        setMockGpsLocation(context, preset.latitude, preset.longitude)
-        logs.add("✓ টেস্ট প্রোভাইডার দিয়ে জিপিএস ফিক্স করা হয়েছে: ${preset.latitude}, ${preset.longitude}")
-      } catch (e: Throwable) {
-        // Fallback using Shizuku cmd location
-        val (cmdOk, cmdLog) = runCommand("cmd location set-location gps ${preset.latitude} ${preset.longitude}")
-        if (cmdOk) {
-          logs.add("✓ cmd location দিয়ে জিপিএস সেট হয়েছে")
-        } else {
-          logs.add("! জিপিএস নোট: ${e.message ?: cmdLog}")
-        }
-      }
-    }
-
+    logs.add("🎉 ফোন সম্পূর্ণভাবে +224 (গিনি) তে কনফিগার সম্পন্ন হয়েছে!")
     Result.success(logs)
   }
 
@@ -226,7 +226,7 @@ object ShizukuSystemController {
 
   suspend fun resetToAutoSettings(context: Context): Result<List<String>> = withContext(Dispatchers.IO) {
     if (!isShizukuRunning() || !hasPermission()) {
-      return@withContext Result.failure(Exception("Shizuku প্রস্তুত নেই"))
+      return@withContext Result.failure(Exception("Shizuku চালু নেই"))
     }
     val logs = mutableListOf<String>()
     logs.add("অটো টাইম জোন ও ডিফল্ট সেটিংস রিস্টোর করা হচ্ছে...")
@@ -234,16 +234,16 @@ object ShizukuSystemController {
     runCommand("settings put global auto_time_zone 1")
     runCommand("settings put global auto_time 1")
 
-    // Mock Provider ক্লিন করা
+    // Mock Provider বন্ধ করা
     try {
       val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
       listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach {
         try { locationManager.removeTestProvider(it) } catch (_: Throwable) {}
       }
-      logs.add("✓ টেস্ট লোকেশন প্রোভাইডার বন্ধ করা হয়েছে")
+      logs.add("✓ জিপিএস মক প্রোভাইডার বন্ধ করা হয়েছে")
     } catch (_: Throwable) {}
 
-    logs.add("✓ ফোন এখন অটোমেটিক টাইম জোন ও লোকেশনে রিস্টোর হয়েছে")
+    logs.add("✓ ফোন স্বাভাবিক অটোমেটিক মোডে রিস্টোর হয়েছে")
     Result.success(logs)
   }
 
@@ -259,10 +259,18 @@ object ShizukuSystemController {
       if (out.trim() == "0") isAuto = false
     } catch (_: Throwable) {}
 
+    var simCountry = ""
+    try {
+      val (_, simOut) = runCommand("getprop gsm.sim.operator.iso-country")
+      simCountry = simOut.trim().uppercase()
+    } catch (_: Throwable) {}
+
     return SystemStatus(
       currentTimezone = tz.id,
       currentLocale = locale.toLanguageTag(),
       currentCountry = locale.country.ifEmpty { "Unknown" },
+      currentLanguage = locale.displayLanguage,
+      telephonySimCountry = simCountry.ifEmpty { "N/A" },
       isAutoTimezone = isAuto,
       formattedCurrentTime = sdf.format(Date())
     )
