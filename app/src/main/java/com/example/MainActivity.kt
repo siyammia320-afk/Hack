@@ -99,11 +99,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -167,12 +172,10 @@ class MainActivity : ComponentActivity() {
 
     setContent {
       MyApplicationTheme {
-        MTFileManagerApp(
+        LocSpooferScreen(
           isShizukuRunning = isShizukuRunningState.value,
           hasShizukuPermission = hasShizukuPermissionState.value,
-          hasStoragePermission = hasStoragePermissionState.value,
-          onRequestShizukuPermission = { ShizukuManager.requestPermission() },
-          onRequestStoragePermission = { requestStorageManagerPermission() }
+          onRequestShizukuPermission = { ShizukuSystemController.requestPermission() }
         )
       }
     }
@@ -194,8 +197,8 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun updateShizukuStatus() {
-    isShizukuRunningState.value = ShizukuManager.isShizukuRunning()
-    hasShizukuPermissionState.value = ShizukuManager.hasPermission()
+    isShizukuRunningState.value = ShizukuSystemController.isShizukuRunning()
+    hasShizukuPermissionState.value = ShizukuSystemController.hasPermission()
   }
 
   private fun checkStoragePermission() {
@@ -310,16 +313,16 @@ fun MTDualPaneScreen(
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
 
-  // Crisp MT Manager Dark Palette (No blur, no glow)
+  // Crisp MT Manager Matte Dark Palette (Zero glow, pure matte)
   val darkBg = Color(0xFF12171E)
   val topBarBg = Color(0xFF19202A)
   val panelBg = Color(0xFF141A22)
   val activePanelBg = Color(0xFF161E28)
-  val activeHighlight = Color(0xFF00E676)
+  val activeHighlight = Color(0xFF4CAF50)
   val borderColor = Color(0xFF232E3A)
   val textColor = Color(0xFFECEFF1)
   val textSubColor = Color(0xFF90A4AE)
-  val folderColor = Color(0xFFFFB300)
+  val folderColor = Color(0xFFD49C1E)
 
   var activePanel by remember { mutableStateOf(ActivePanel.LEFT) }
 
@@ -1301,7 +1304,7 @@ fun PanelTabHeader(
   isActive: Boolean,
   onClick: () -> Unit
 ) {
-  val activeColor = Color(0xFF00E676)
+  val activeColor = Color(0xFF4CAF50)
   val inactiveColor = Color(0xFF232E3A)
 
   Surface(
@@ -1527,13 +1530,12 @@ fun FullScreenCodeViewer(
   data: CodeViewerData,
   onClose: () -> Unit
 ) {
-  val context = LocalContext.current
   val scope = rememberCoroutineScope()
   val darkBg = Color(0xFF0F141A)
   val topBarBg = Color(0xFF161E27)
   val textColor = Color(0xFFE6EDF3)
   val textSubColor = Color(0xFF8B949E)
-  val accentColor = Color(0xFF00E676)
+  val accentColor = Color(0xFF4CAF50)
   val borderColor = Color(0xFF263238)
 
   var textFieldValue by remember { mutableStateOf(TextFieldValue(data.initialContent)) }
@@ -1562,17 +1564,75 @@ fun FullScreenCodeViewer(
     }
   }
 
+  // Pre-calculate line offsets for fast, accurate line lookup
+  val lineOffsets = remember(textFieldValue.text) {
+    val offsets = mutableListOf(0)
+    textFieldValue.text.forEachIndexed { idx, char ->
+      if (char == '\n') offsets.add(idx + 1)
+    }
+    offsets
+  }
+
+  fun getLineFromOffset(offset: Int): Int {
+    if (lineOffsets.isEmpty()) return 1
+    val index = lineOffsets.binarySearch(offset)
+    return if (index >= 0) index + 1 else -index - 1
+  }
+
   fun jumpToMatch(index: Int) {
     if (matches.isEmpty()) return
-    val targetIndex = (index + matches.size) % matches.size
+    val targetIndex = (index % matches.size + matches.size) % matches.size
     currentMatchIndex = targetIndex
     val match = matches[targetIndex]
     textFieldValue = textFieldValue.copy(
       selection = TextRange(match.first, match.second)
     )
-    val lineNum = textFieldValue.text.substring(0, match.first).count { it == '\n' }
+    val lineNum = getLineFromOffset(match.first)
     scope.launch {
-      verticalScrollState.animateScrollTo((lineNum * 54 - 120).coerceAtLeast(0))
+      // 22.dp per line ~ approximately 60px depending on density, scrollTo centered
+      val approxLinePx = 62
+      val targetScroll = ((lineNum - 5) * approxLinePx).coerceAtLeast(0)
+      verticalScrollState.animateScrollTo(targetScroll)
+    }
+  }
+
+  // VisualTransformation to highlight all search matches
+  val searchVisualTransformation = remember(searchQuery, matches, currentMatchIndex) {
+    VisualTransformation { original ->
+      if (searchQuery.isBlank() || matches.isEmpty()) {
+        TransformedText(original, OffsetMapping.Identity)
+      } else {
+        val annotated = buildAnnotatedString {
+          append(original.text)
+          matches.forEachIndexed { idx, (start, end) ->
+            if (start in 0..original.text.length && end in 0..original.text.length && start < end) {
+              if (idx == currentMatchIndex) {
+                // Active match: matte warm contrast, zero glow
+                addStyle(
+                  SpanStyle(
+                    background = Color(0xFFC88719),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                  ),
+                  start,
+                  end
+                )
+              } else {
+                // Other matches: matte dark slate tone, zero glow
+                addStyle(
+                  SpanStyle(
+                    background = Color(0xFF263238),
+                    color = Color(0xFFECEFF1)
+                  ),
+                  start,
+                  end
+                )
+              }
+            }
+          }
+        }
+        TransformedText(annotated, OffsetMapping.Identity)
+      }
     }
   }
 
@@ -1592,8 +1652,9 @@ fun FullScreenCodeViewer(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
               )
+              val currentLine = getLineFromOffset(textFieldValue.selection.start)
               Text(
-                text = "${textFieldValue.text.lines().size} lines • ${if (data.isReadOnly) "Read Only" else "Editable"}",
+                text = "Line $currentLine/${lineOffsets.size} • ${if (data.isReadOnly) "Read Only" else "Editable"}",
                 color = textSubColor,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace
@@ -1650,12 +1711,16 @@ fun FullScreenCodeViewer(
               onValueChange = {
                 searchQuery = it
                 currentMatchIndex = 0
-                if (it.isNotEmpty()) {
+                if (it.isNotBlank()) {
                   val first = textFieldValue.text.indexOf(it, ignoreCase = true)
                   if (first != -1) {
                     textFieldValue = textFieldValue.copy(
                       selection = TextRange(first, first + it.length)
                     )
+                    val line = getLineFromOffset(first)
+                    scope.launch {
+                      verticalScrollState.animateScrollTo(((line - 5) * 62).coerceAtLeast(0))
+                    }
                   }
                 }
               },
@@ -1677,8 +1742,16 @@ fun FullScreenCodeViewer(
 
             Spacer(modifier = Modifier.width(6.dp))
 
+            // Shows exact match position, e.g. 1/14 (Line 25)
+            val matchLineInfo = if (matches.isNotEmpty()) {
+              val line = getLineFromOffset(matches[currentMatchIndex].first)
+              "${currentMatchIndex + 1}/${matches.size} (L:$line)"
+            } else {
+              if (searchQuery.isNotEmpty()) "0 found" else "0"
+            }
+
             Text(
-              text = if (matches.isEmpty()) "0" else "${currentMatchIndex + 1}/${matches.size}",
+              text = matchLineInfo,
               color = if (matches.isEmpty() && searchQuery.isNotEmpty()) Color(0xFFFF5252) else accentColor,
               fontSize = 11.sp,
               fontFamily = FontFamily.Monospace,
@@ -1715,8 +1788,7 @@ fun FullScreenCodeViewer(
       }
     }
   ) { paddingValues ->
-    val lines = remember(textFieldValue.text) { textFieldValue.text.lines() }
-    val lineCount = lines.size.coerceAtLeast(1)
+    val lineCount = lineOffsets.size.coerceAtLeast(1)
 
     Row(
       modifier = Modifier
@@ -1751,7 +1823,7 @@ fun FullScreenCodeViewer(
           .background(borderColor)
       )
 
-      // Code editor area
+      // Code editor area with visual highlight transformation
       Box(
         modifier = Modifier
           .weight(1f)
@@ -1766,6 +1838,7 @@ fun FullScreenCodeViewer(
             }
           },
           readOnly = data.isReadOnly,
+          visualTransformation = searchVisualTransformation,
           textStyle = TextStyle(
             color = textColor,
             fontSize = 12.sp,
@@ -1798,7 +1871,7 @@ fun ZipBrowserScreen(
   val darkBg = Color(0xFF0F141A)
   val topBarBg = Color(0xFF161E27)
   val cardBg = Color(0xFF19222C)
-  val accentColor = Color(0xFF00E676)
+  val accentColor = Color(0xFF4CAF50)
   val textColor = Color(0xFFE6EDF3)
   val textSubColor = Color(0xFF8B949E)
   val borderColor = Color(0xFF263238)

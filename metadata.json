@@ -1,6 +1,6 @@
 {
-  "name": "MT File Manager",
-  "description": "MT Manager style File Manager with full file operations and Shizuku Android/data access",
+  "name": "Location & Region Spoofer",
+  "description": "Shizuku powered Location, Auto Timezone and Region changer with presets including Guinea (+224)",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
